@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+
+# gatehouse local cache (if ever created in-repo during dev)
+.gatehouse/
+
+*.log
+.DS_Store
+Thumbs.db
