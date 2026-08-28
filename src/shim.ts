@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import fsAsync from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,165 +17,195 @@ function shimsDir(): string {
 /** Target commands to shim. */
 const SHIM_TARGETS = ['npm', 'npx', 'bun', 'pnpm', 'yarn'] as const;
 
-/** Check if a command looks like an install command. */
-function isInstallCommand(cmd: string, args: string[]): boolean {
-  const firstArg = args[0] ?? '';
-  if (cmd === 'npx') {
-    return true;
-  }
-  if (cmd === 'bun') {
-    return firstArg === 'add' || firstArg === 'install' || firstArg === 'i';
-  }
-  if (cmd === 'pnpm') {
-    return firstArg === 'add' || firstArg === 'install' || firstArg === 'i';
-  }
-  if (cmd === 'yarn') {
-    return firstArg === 'add';
-  }
-  return firstArg === 'install' || firstArg === 'i' || firstArg === 'add' || firstArg === 'ci';
+export type ShimTarget = (typeof SHIM_TARGETS)[number];
+
+/**
+ * Per-target install semantics, resolved at generation time.
+ *
+ * `verbs` empty means every invocation installs (npx), so the generated
+ * script carries no runtime dispatch: each shim only contains the logic
+ * for its own command.
+ */
+const INSTALL_VERBS: Record<ShimTarget, readonly string[]> = {
+  npm: ['install', 'i', 'add', 'ci'],
+  npx: [],
+  bun: ['add', 'install', 'i'],
+  pnpm: ['add', 'install', 'i'],
+  yarn: ['add'],
+};
+
+/** Executable extensions to probe when resolving the real command on Windows. */
+const WINDOWS_EXTS: Record<ShimTarget, readonly string[]> = {
+  npm: ['.cmd', '.exe'],
+  npx: ['.cmd', '.exe'],
+  bun: ['.exe', '.cmd'],
+  pnpm: ['.cmd', '.exe'],
+  yarn: ['.cmd', '.exe'],
+};
+
+/**
+ * True when `args` for `target` describe an install.
+ *
+ * Shared by the generators and the tests; the emitted scripts encode the
+ * same decision inline so a shim never shells back into Node to classify.
+ */
+export function isInstallCommand(target: string, args: readonly string[]): boolean {
+  const verbs = INSTALL_VERBS[target as ShimTarget];
+  if (verbs === undefined) return false;
+  if (verbs.length === 0) return true;
+  return verbs.includes(args[0] ?? '');
 }
 
-/** Generate Unix shell shim script. */
-function generateUnixShim(target: string): string {
-  return `#!/bin/sh
-# Gatehouse shim for ${target}
-# This file is managed by gatehouse. Do not edit manually.
-
-GATEHOUSE_BIN="${GATEHOUSE_BIN}"
-REAL_CMD="$(command -v ${target} 2>/dev/null | head -1)"
-
-if [ -z "${REAL_CMD}" ] || [ "${REAL_CMD}" = "${SHIMS_DIR}/${target}" ]; then
-  echo "gatehouse: real ${target} not found in PATH" >&2
-  exit 127
-fi
-
-IS_INSTALL=0
-case "${target}" in
-  npx)
-    IS_INSTALL=1
-    ;;
-  bun)
-    case "${1}" in
-      add|install|i) IS_INSTALL=1 ;;
-    esac
-    ;;
-  pnpm|yarn)
-    case "${1}" in
-      add|install|i) IS_INSTALL=1 ;;
-    esac
-    ;;
-  *)
-    case "${1}" in
-      install|i|add|ci) IS_INSTALL=1 ;;
-    esac
-    ;;
-esac
-
-if [ "${IS_INSTALL}" = "1" ]; then
-  SPECS=""
-  case "${target}" in
-    npx)
-      SPECS="${1}"
-      ;;
-    bun|pnpm|yarn)
-      shift
-      for arg in "$@"; do
-        case "${arg}" in
-          -*) continue ;;
-        esac
-        SPECS="${SPECS} ${arg}"
-      done
-      ;;
-    *)
-      shift
-      for arg in "$@"; do
-        case "${arg}" in
-          -*) break ;;
-        esac
-        SPECS="${SPECS} ${arg}"
-      done
-      ;;
-  esac
-
-  for spec in ${SPECS}; do
-    if [ -n "${spec}" ]; then
-      node "${GATEHOUSE_BIN}" check "${spec}" >&2 || exit $?
-    fi
-  done
-fi
-
-exec "${REAL_CMD}" "$@"
-`;
+/** POSIX single-quoting; both call sites embed absolute paths into sh. */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Generate Windows CMD shim script. */
-function generateWindowsShim(target: string): string {
-  const binPath = GATEHOUSE_BIN.replace(/\\/g, '\\\\');
-  return `@echo off
-REM Gatehouse shim for ${target}
-REM This file is managed by gatehouse. Do not edit manually.
+/**
+ * Generate the POSIX shim for `target`.
+ *
+ * The script resolves the real command by walking PATH while skipping
+ * `dir`, because the shim itself shadows the target name there.
+ */
+function generateUnixShim(target: ShimTarget, dir: string): string {
+  const verbs = INSTALL_VERBS[target];
+  const lines: string[] = [
+    '#!/bin/sh',
+    `# Gatehouse shim for ${target}`,
+    '# This file is managed by gatehouse. Do not edit manually.',
+    '',
+    `GATEHOUSE_BIN=${shQuote(GATEHOUSE_BIN)}`,
+    `SHIMS_DIR=${shQuote(dir)}`,
+    '',
+    'REAL_CMD=""',
+    'saved_ifs=$IFS',
+    'IFS=:',
+    'for dir_entry in $PATH; do',
+    '  [ -n "$dir_entry" ] || continue',
+    '  [ "$dir_entry" = "$SHIMS_DIR" ] && continue',
+    `  if [ -x "$dir_entry/${target}" ]; then`,
+    `    REAL_CMD="$dir_entry/${target}"`,
+    '    break',
+    '  fi',
+    'done',
+    'IFS=$saved_ifs',
+    '',
+    'if [ -z "$REAL_CMD" ]; then',
+    `  echo "gatehouse: real ${target} not found in PATH" >&2`,
+    '  exit 127',
+    'fi',
+    '',
+  ];
 
-set "GATEHOUSE_BIN=${binPath}"
-set "REAL_EXEC="
+  if (verbs.length === 0) {
+    // npx: the first non-flag argument is the package about to be fetched.
+    lines.push(
+      'for candidate in "$@"; do',
+      '  case "$candidate" in',
+      '    -*) continue ;;',
+      '  esac',
+      '  node "$GATEHOUSE_BIN" check "$candidate" >&2 || exit $?',
+      '  break',
+      'done',
+      '',
+    );
+  } else {
+    const pattern = verbs.join('|');
+    lines.push(
+      'case "${1:-}" in',
+      `  ${pattern})`,
+      '    shift',
+      '    for candidate in "$@"; do',
+      '      case "$candidate" in',
+      '        -*) continue ;;',
+      '      esac',
+      '      node "$GATEHOUSE_BIN" check "$candidate" >&2 || exit $?',
+      '    done',
+      '    ;;',
+      'esac',
+      '',
+    );
+  }
 
-REM Find real ${target} in PATH (skip shim dir itself)
-for %%E in (${target}.cmd ${target}.exe) do (
-  if defined REAL_EXEC goto :found_real
-  for %%D in (PATH) do (
-    for %%F in (%%~dp$%%D:I${target} 2>nul) do (
-      echo.%%~fF | findstr /i /v "%~dp0" >nul
-      if not errorlevel 1 (
-        echo.%%~nxF | findstr /i /v "real_" >nul
-        if not errorlevel 1 set "REAL_EXEC=%%~fF"
-      )
-    )
-  )
-)
+  lines.push('exec "$REAL_CMD" "$@"', '');
+  return lines.join('\n');
+}
 
-:found_real
-if not defined REAL_EXEC (
-  echo gatehouse: real ${target} not found in PATH >&2
-  exit /b 127
-)
+/** Generate the Windows CMD shim for `target`. */
+function generateWindowsShim(target: ShimTarget, dir: string): string {
+  const verbs = INSTALL_VERBS[target];
+  const lines: string[] = [
+    '@echo off',
+    'setlocal enabledelayedexpansion',
+    `REM Gatehouse shim for ${target}`,
+    'REM This file is managed by gatehouse. Do not edit manually.',
+    '',
+    `set "GATEHOUSE_BIN=${GATEHOUSE_BIN}"`,
+    `set "SHIMS_DIR=${dir}"`,
+    'set "REAL_CMD="',
+    '',
+    'for %%D in ("%PATH:;=" "%") do (',
+    '  if not "%%~D"=="" if /i not "%%~fD"=="%SHIMS_DIR%" (',
+  ];
 
-REM Detect install commands
-set "IS_INSTALL=0"
-for %%A in (install i add ci) do if /i "%~1" == "%%A" set "IS_INSTALL=1"
-for %%A in (-D -P -O --save-dev --save-prod --save-optional --no-save) do if /i "%~1" == "%%A" set "IS_INSTALL=1"
-if /i "%~nx0" == "npx.cmd" set "IS_INSTALL=1"
+  for (const ext of WINDOWS_EXTS[target]) {
+    lines.push(
+      `    if not defined REAL_CMD if exist "%%~D\\${target}${ext}" set "REAL_CMD=%%~D\\${target}${ext}"`,
+    );
+  }
 
-if "%IS_INSTALL%"=="1" (
-  set "SPECS="
-  :npm_loop
-  if "%~1"=="" goto :check_specs
-  echo %~1|findstr /i /r "^-">nul
-  if errorlevel 1 (
-    set "SPECS=!SPECS! %~1"
-  ) else (
-    if /i "%~1"=="-D" goto :skip_spec
-    if /i "%~1"=="-P" goto :skip_spec
-    if /i "%~1"=="-O" goto :skip_spec
-    if /i "%~1"=="--save-dev" goto :skip_spec
-    if /i "%~1"=="--save-prod" goto :skip_spec
-    if /i "%~1"=="--save-optional" goto :skip_spec
-    if /i "%~1"=="--no-save" goto :skip_spec
-    set "SPECS=!SPECS! %~1"
-  )
-  :skip_spec
-  shift
-  goto :npm_loop
+  lines.push(
+    '  )',
+    ')',
+    '',
+    'if not defined REAL_CMD (',
+    `  echo gatehouse: real ${target} not found in PATH 1>&2`,
+    '  exit /b 127',
+    ')',
+    '',
+  );
 
-  :check_specs
-  for %%S in (!SPECS!) do (
-    if not "%%~S"=="" (
-      node "%GATEHOUSE_BIN%" check "%%~S" >&2
-      if errorlevel 1 exit /b %errorlevel%
-    )
-  )
-)
+  if (verbs.length === 0) {
+    // npx: gate the first non-flag argument, then hand over.
+    lines.push(
+      ':npx_scan',
+      'if "%~1"=="" goto :run_real',
+      'set "ARG=%~1"',
+      'if "!ARG:~0,1!"=="-" (',
+      '  shift',
+      '  goto :npx_scan',
+      ')',
+      'node "%GATEHOUSE_BIN%" check "!ARG!" 1>&2',
+      'if errorlevel 1 exit /b !errorlevel!',
+      'goto :run_real',
+      '',
+    );
+  } else {
+    lines.push('set "IS_INSTALL=0"');
+    for (const verb of verbs) {
+      lines.push(`if /i "%~1"=="${verb}" set "IS_INSTALL=1"`);
+    }
+    // Labels cannot live inside a parenthesized block, so the collect loop
+    // is flat and guarded by a jump.
+    lines.push(
+      'if not "%IS_INSTALL%"=="1" goto :run_real',
+      'shift',
+      '',
+      ':collect',
+      'if "%~1"=="" goto :run_real',
+      'set "ARG=%~1"',
+      'if not "!ARG:~0,1!"=="-" (',
+      '  node "%GATEHOUSE_BIN%" check "!ARG!" 1>&2',
+      '  if errorlevel 1 exit /b !errorlevel!',
+      ')',
+      'shift',
+      'goto :collect',
+      '',
+    );
+  }
 
-%REAL_EXEC% %*
-`;
+  lines.push(':run_real', '"%REAL_CMD%" %*', '');
+  return lines.join('\r\n');
 }
 
 /** Install shims for all targets. */
@@ -186,16 +215,12 @@ export async function installShims(): Promise<number> {
 
   let created = 0;
   for (const target of SHIM_TARGETS) {
-    // Unix shim
-    const unixPath = path.join(dir, target);
-    const unixContent = generateUnixShim(target).replace('${SHIMS_DIR}', dir);
-    await fsAsync.writeFile(unixPath, unixContent, { mode: 0o755 });
+    await fsAsync.writeFile(path.join(dir, target), generateUnixShim(target, dir), {
+      mode: 0o755,
+    });
     created++;
 
-    // Windows shim
-    const winPath = path.join(dir, `${target}.cmd`);
-    const winContent = generateWindowsShim(target);
-    await fsAsync.writeFile(winPath, winContent);
+    await fsAsync.writeFile(path.join(dir, `${target}.cmd`), generateWindowsShim(target, dir));
     created++;
   }
 
@@ -209,7 +234,7 @@ export async function installShims(): Promise<number> {
   console.log(`  echo 'export PATH="${dir}:$PATH"' >> ~/.bashrc`);
   console.log('');
   console.log('For Windows (PowerShell):');
-  console.log(`  [Environment]::SetEnvironmentVariable('Path', $env:Path + ';${dir}', 'User')`);
+  console.log(`  [Environment]::SetEnvironmentVariable('Path', "${dir};" + $env:Path, 'User')`);
   console.log('');
   console.log('Run `gatehouse shim status` to verify.');
 

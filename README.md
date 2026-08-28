@@ -33,6 +33,18 @@ gatehouse check react   # GREEN → exit code 0
 
 Requires Node.js ≥ 20.
 
+### Gate your terminal automatically
+
+```bash
+gatehouse shim install   # writes wrappers for npm/npx/bun/pnpm/yarn
+gatehouse shim status    # verify they exist and PATH picks them up
+```
+
+`shim install` writes `~/.gatehouse/shims` (sh + `.cmd` variants). Put that
+directory first on `PATH` and every `npm install <pkg>` / `npx <pkg>` is
+checked before the real command runs; RED exits non-zero and the install
+never happens. `gatehouse shim uninstall` removes them.
+
 ## Verdicts
 
 Three levels, decided by a deterministic engine — never an LLM, never a black-box score:
@@ -68,12 +80,12 @@ Anything not on that table does not affect the verdict. There is no hidden scori
 
 - It does not detonate packages — behavioral sandbox analysis (WSL2 + fake internet) is on the roadmap below.
 - It does not watch already-installed packages over time.
-- It does not cover yarn/pnpm/bun shims yet — the engine is manager-agnostic, the wrappers are next.
+- Shims gate the specs named on the command line, not the full transitive tree a resolver pulls in.
 
 ## Roadmap
 
 - [x] **M0** Feed sync + deterministic verdict engine + CLI (this release)
-- [ ] **M1** PATH shims so terminal installs route through the gate automatically
+- [x] **M1** PATH shims so terminal installs route through the gate automatically
 - [ ] **M2** AI-agent connectors — Claude Code `PreToolUse` hook first, then opencode / Codex / Cursor
 - [ ] **TUI** Dashboard · Quarantine · Packages · Agents · Reports tabs
 - [ ] **M4** Detonation sandbox v1 (WSL2): lifecycle-script execution with DNS sinkhole, C2 capture, evidence reports
