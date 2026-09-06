@@ -21,7 +21,9 @@ USAGE
   gatehouse check <name[@version]> [--json]   verdict for one package
   gatehouse sync                              refresh IOC feeds now
   gatehouse watch <pkg> | sweep | list        quarantine watch: observe YELLOW installs
+  gatehouse detonate <pkg> [--json]           WSL2 sandbox: run install, capture behavior
   gatehouse tui                               launch the control center (TUI)
+  gatehouse shim [install|uninstall|status]   manage PATH shims for npm/npx/bun/pnpm/yarn
   gatehouse agent [connect|disconnect|status] [host] [--project]
                                               gate an AI agent; host: claude|cursor|codex|opencode
                                               (status with no host reports all)
@@ -40,7 +42,7 @@ RULES (transparent by design)
          (fail safe: if we cannot verify, we do not silently pass)`;
 
 interface CliArgs {
-  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'watch' | 'help' | 'version';
+  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'watch' | 'detonate' | 'help' | 'version';
   spec?: string;
   json?: boolean;
   shimAction?: 'install' | 'uninstall' | 'status';
@@ -107,6 +109,11 @@ function parseArgs(argv: string[]): CliArgs | null {
       return { command: 'tui' };
     case 'watch':
       return { command: 'watch', watchArg: positional[1], json };
+    case 'detonate': {
+      const spec = positional[1];
+      if (spec === undefined) return null;
+      return { command: 'detonate', spec, json };
+    }
     case 'check': {
       const spec = positional[1];
       if (spec === undefined) return null;
@@ -268,6 +275,57 @@ async function runWatch(arg: string | undefined, json: boolean): Promise<number>
   return 1;
 }
 
+/** Category → color for the detonation report headline. */
+const DETONATION_COLOR: Record<string, string> = {
+  'malicious-indicators': COLORS.red,
+  suspicious: COLORS.yellow,
+  unremarkable: COLORS.green,
+};
+
+/**
+ * `detonate <pkg>` — run the WSL2 sandbox and print the evidence report.
+ * Requires WSL; degrades with a clear message when it is unavailable rather
+ * than pretending to have observed anything.
+ */
+async function runDetonate(spec: string, json: boolean): Promise<number> {
+  const { detonate, wslAvailable } = await import('./core/detonate/runner.js');
+  if (!(await wslAvailable())) {
+    console.error(
+      'detonation requires WSL2 (run `wsl --install`). ' +
+        'The gate and watch modes work without it; detonation does not.',
+    );
+    return 64;
+  }
+
+  console.error(paint(`detonating ${spec} in WSL2 sandbox (isolated)…`, COLORS.dim));
+  const report = await detonate(spec);
+
+  if (json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else if (report.error !== null) {
+    console.error(`detonation error: ${report.error}`);
+    return 2;
+  } else {
+    const color = DETONATION_COLOR[report.category] ?? COLORS.dim;
+    console.log(`gatehouse detonation · ${report.spec}`);
+    console.log(paint(`CATEGORY: ${report.category.toUpperCase()}`, color));
+    if (report.findings.length === 0) {
+      console.log(' no notable behavior observed during install');
+    }
+    for (const f of report.findings) {
+      console.log(` • ${f}`);
+    }
+    console.log(
+      paint('sandboxes prove guilt, never innocence — unremarkable ≠ safe', COLORS.dim),
+    );
+  }
+
+  // Exit code mirrors verdict severity for scripting.
+  if (report.category === 'malicious-indicators') return 2;
+  if (report.category === 'suspicious') return 1;
+  return 0;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args === null) {
@@ -313,6 +371,10 @@ async function main(): Promise<number> {
 
   if (args.command === 'watch') {
     return runWatch(args.watchArg, args.json === true);
+  }
+
+  if (args.command === 'detonate') {
+    return runDetonate(args.spec ?? '', args.json === true);
   }
 
   if (args.command === 'agent') {
