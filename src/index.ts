@@ -20,8 +20,8 @@ const HELP = `gatehouse ${VERSION} - local-first security gate for npm installs
 USAGE
   gatehouse check <name[@version]> [--json]   verdict for one package
   gatehouse sync                              refresh IOC feeds now
+  gatehouse watch <pkg> | sweep | list        quarantine watch: observe YELLOW installs
   gatehouse tui                               launch the control center (TUI)
-  gatehouse shim [install|uninstall|status]   manage PATH shims for npm/npx/bun/pnpm/yarn
   gatehouse agent [connect|disconnect|status] [host] [--project]
                                               gate an AI agent; host: claude|cursor|codex|opencode
                                               (status with no host reports all)
@@ -40,7 +40,7 @@ RULES (transparent by design)
          (fail safe: if we cannot verify, we do not silently pass)`;
 
 interface CliArgs {
-  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'help' | 'version';
+  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'watch' | 'help' | 'version';
   spec?: string;
   json?: boolean;
   shimAction?: 'install' | 'uninstall' | 'status';
@@ -48,6 +48,7 @@ interface CliArgs {
   agentHost?: string;
   scope?: 'user' | 'project';
   dialect?: 'claude' | 'cursor';
+  watchArg?: string;
 }
 
 function parseArgs(argv: string[]): CliArgs | null {
@@ -104,6 +105,8 @@ function parseArgs(argv: string[]): CliArgs | null {
       return { command: 'agent-hook', dialect };
     case 'tui':
       return { command: 'tui' };
+    case 'watch':
+      return { command: 'watch', watchArg: positional[1], json };
     case 'check': {
       const spec = positional[1];
       if (spec === undefined) return null;
@@ -179,6 +182,92 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** Default watch window before a quiet package is auto-promoted: 3 days. */
+const WATCH_PROMOTE_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * `watch <pkg>`  → gate the package; if YELLOW, enter watch mode with a
+ *                  persistence-surface baseline. RED is refused (block, don't
+ *                  watch); GREEN needs no watching.
+ * `watch sweep`  → inspect every watched package: kill any that touched a
+ *                  persistence surface, promote any quiet past the window.
+ * `watch list`   → show current watch entries.
+ */
+async function runWatch(arg: string | undefined, json: boolean): Promise<number> {
+  const { beginWatch, sweepWatched, promoteQuiet } = await import(
+    './core/quarantine/watch.js'
+  );
+  const { listQuarantine } = await import('./core/history/quarantine.js');
+
+  if (arg === undefined || arg === 'list') {
+    const entries = await listQuarantine();
+    if (json) {
+      console.log(JSON.stringify(entries, null, 2));
+    } else if (entries.length === 0) {
+      console.log('No packages under watch.');
+    } else {
+      for (const e of entries) {
+        const spec = e.version === null ? e.name : `${e.name}@${e.version}`;
+        console.log(`${e.state.padEnd(9)} ${spec}  (since ${e.since})`);
+      }
+    }
+    return 0;
+  }
+
+  if (arg === 'sweep') {
+    const swept = await sweepWatched();
+    const promoted = await promoteQuiet(WATCH_PROMOTE_MS);
+    const killed = swept.filter((s) => s.action === 'killed');
+    for (const s of killed) {
+      const spec =
+        s.finding.version === null ? s.finding.name : `${s.finding.name}@${s.finding.version}`;
+      console.log(
+        paint(`KILLED ${spec}`, COLORS.red) +
+          ` — touched ${s.finding.changes.map((c) => c.surface).join(', ')}`,
+      );
+    }
+    for (const p of promoted) {
+      const spec = p.version === null ? p.name : `${p.name}@${p.version}`;
+      console.log(paint(`PROMOTED ${spec}`, COLORS.green) + ` — ${p.note ?? 'quiet'}`);
+    }
+    console.log(
+      paint(
+        `swept ${swept.length} watched · ${killed.length} killed · ${promoted.length} promoted`,
+        COLORS.dim,
+      ),
+    );
+    return 0;
+  }
+
+  // watch <pkg>: gate first, then enter watch mode only for YELLOW.
+  const outcome = await check(arg);
+  if (!outcome.ok) {
+    console.error(`error: ${outcome.error}`);
+    return 2;
+  }
+  const { verdict } = outcome.value;
+  if (verdict.level === 'red') {
+    console.error(paint(`RED — ${arg} is malicious, refusing to watch. Blocked.`, COLORS.red));
+    return 2;
+  }
+  if (verdict.level === 'green') {
+    console.log(paint(`GREEN — ${arg} is clean, no watch needed.`, COLORS.green));
+    return 0;
+  }
+  const entry = await beginWatch(
+    verdict.name,
+    verdict.version,
+    verdict.reasons.map((r) => r.code),
+  );
+  console.log(
+    paint(`YELLOW — ${arg} entered watch mode.`, COLORS.yellow) +
+      `\nInstall it normally; run \`gatehouse watch sweep\` over the next days.` +
+      `\nQuiet for 3 days → auto-promoted. Touches a persistence surface → killed.` +
+      `\nwatching since ${entry.since}`,
+  );
+  return 1;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args === null) {
@@ -220,6 +309,10 @@ async function main(): Promise<number> {
   if (args.command === 'tui') {
     const { runTui } = await import('./tui/index.js');
     return runTui();
+  }
+
+  if (args.command === 'watch') {
+    return runWatch(args.watchArg, args.json === true);
   }
 
   if (args.command === 'agent') {
