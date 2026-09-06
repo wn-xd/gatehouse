@@ -269,4 +269,41 @@ describe('App', () => {
     await app.handleGlobal(decodeKey('2'));
     expect(refreshed).toBe(1);
   });
+
+  it('waits for an async refresh before painting the new surface', async () => {
+    // Regression: switching surfaces used to fire refresh without awaiting it,
+    // so a surface that loads from disk painted its empty initial state and
+    // only showed data after the next keypress.
+    const cap = captureStream();
+    let loaded: string[] = [];
+    // The refresh blocks on a gate this test opens only after dispatch has been
+    // started, so the load is genuinely still pending at the moment an
+    // unawaited implementation would paint. No wall-clock timing involved.
+    let openGate = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const slow: Tab = {
+      name: 'Slow',
+      paint: (screen, box) => {
+        screen.write(box.x, box.y, loaded.length === 0 ? 'nothing here' : loaded.join(','));
+      },
+      refresh: async () => {
+        await gate;
+        loaded = ['alpha', 'beta'];
+      },
+    };
+    const app = new App([makeTab('First', 'first'), slow], cap.stream);
+
+    cap.reset();
+    const dispatched = app.dispatch(decodeKey('2'));
+    // Let dispatch reach the refresh, then release it.
+    await Promise.resolve();
+    openGate();
+    await dispatched;
+
+    const text = visible(cap.text());
+    expect(text).toContain('alpha,beta');
+    expect(text).not.toContain('nothing here');
+  });
 });

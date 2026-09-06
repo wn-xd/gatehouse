@@ -155,17 +155,24 @@ export class App {
     this.screen.present();
   }
 
-  private switchTo(index: number): void {
+  /**
+   * Activate a surface, loading its data before the caller paints.
+   *
+   * The refresh must be awaited: a surface reads from disk, and painting before
+   * that resolves shows an empty view that only corrects itself on the next
+   * keypress.
+   */
+  private async switchTo(index: number): Promise<void> {
     if (index < 0 || index >= this.tabs.length || index === this.active) return;
     this.active = index;
-    void this.current().refresh?.();
+    await this.current().refresh?.();
   }
 
   /** Route a global key. Returns false when the app should quit. */
   async handleGlobal(key: Key): Promise<boolean> {
     if (key.name === 'q' || key.name === 'ctrl-c') return false;
     if (key.name === 'tab') {
-      this.switchTo((this.active + 1) % this.tabs.length);
+      await this.switchTo((this.active + 1) % this.tabs.length);
       return true;
     }
     if (key.name === 'r') {
@@ -173,7 +180,7 @@ export class App {
       return true;
     }
     if (/^[1-9]$/.test(key.name)) {
-      this.switchTo(Number(key.name) - 1);
+      await this.switchTo(Number(key.name) - 1);
       return true;
     }
     return true;
