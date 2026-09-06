@@ -108,9 +108,17 @@ async function main() {
     'utf8',
   );
 
+  // Ship the installer beside the payload, so the release directory is the
+  // complete, self-sufficient thing a user is handed.
+  await cp(
+    path.join(packaging, 'install.ps1'),
+    path.join(repoRoot, 'gui', 'release', 'install.ps1'),
+  );
+
   const bytes = await treeSize(out);
   console.log(`bundle ready: ${(bytes / 1024 / 1024).toFixed(1)} MB`);
   console.log(`launcher:     ${path.join(out, 'Gatehouse.exe')}`);
+  console.log(`installer:    ${path.join(repoRoot, 'gui', 'release', 'install.ps1')}`);
 }
 
 await main();

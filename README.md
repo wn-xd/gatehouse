@@ -72,17 +72,45 @@ the deterministic engine — never the agent, which in this threat model may
 itself be the adversary. ChainDrop persists via `.claude/settings.json`; this
 points the same mechanism the other way.
 
-### Control center (TUI / GUI)
+### Control center (TUI and desktop app)
 
 ```bash
-gatehouse tui    # terminal control center (zero-dep ANSI)
-gatehouse gui    # same, in a browser on 127.0.0.1 (loopback only)
+gatehouse tui    # terminal control center
+gatehouse gui    # desktop app (installed separately, see below)
 ```
 
-Five tabs — Dashboard · Packages · Quarantine · Agents · Reports — over the
-same engine. The Packages tab renders npm search results with a live verdict
-column, the differentiator no other package browser can show. Both faces
+Five surfaces — Dashboard · Packages · Quarantine · Agents · Reports — over the
+same engine. The Packages surface lists registry search results with a live
+verdict column, the thing no other package browser can show you. Both faces
 delegate to the identical gate path; neither can bypass it.
+
+The **TUI** is zero-dependency: raw ANSI against the Node standard library, with
+a diffing double buffer so only changed cells are written and frames present
+atomically (DEC 2026 synchronized output). Moving a selection costs ~49 bytes
+rather than a full repaint, which is why it does not flicker.
+
+The **desktop app** is a real native window — Tao/Wry over the WebView2 runtime
+that ships with Windows, about 4 MB rather than the ~100 MB an Electron build
+would cost. It has no HTTP server and opens no socket: the document is served
+over a custom `app://` scheme and the UI talks to the engine over the webview's
+IPC channel, in-process.
+
+#### Installing the desktop app
+
+```bash
+npm run bundle -w gatehouse-gui                    # build the application
+powershell -ExecutionPolicy Bypass -File gui/release/install.ps1
+```
+
+Installs per-user into `%LOCALAPPDATA%\Programs\Gatehouse` — no administrator
+rights, nothing written outside your profile. It adds a Start Menu entry and
+puts `gatehouse` on your PATH, so **installing the app gives you the CLI and
+TUI too**. The reverse is deliberately untrue: `npm install -g gatehouse` never
+pulls in the desktop app or its native dependency, and the core package keeps
+zero runtime dependencies.
+
+Remove it with `install.ps1 -Uninstall`, which leaves your cached feeds and
+history in `~/.gatehouse` alone.
 
 ### Quarantine watch & detonation
 
@@ -117,7 +145,7 @@ Anything not on that table does not affect the verdict. There is no hidden scori
 
 ## Design principles
 
-- **Zero runtime dependencies.** The entire engine is TypeScript against the Node standard library. A supply-chain security tool that ships no supply chain of its own.
+- **Zero runtime dependencies.** The engine, CLI and TUI are TypeScript against the Node standard library. A supply-chain security tool that ships no supply chain of its own. The desktop app is a separate package precisely so its one native dependency stays out of the tool everyone installs — including its animation: the springs are ~40 lines of hand-written physics rather than a motion library.
 - **Deterministic engine, structured output.** Same input → same verdict. `--json` emits machine-readable results; exit codes are a stable contract for shell wrappers, CI jobs and AI-agent hooks.
 - **Evidence, not vibes.** Every verdict lists its reasons with codes (`ioc-feed-match`, `recent-publish`, ...) and the exact sources consulted.
 - **Fail safe.** If Gatehouse cannot verify (registry down, feeds stale), the verdict degrades to YELLOW with the reason stated. It will never tell you "fine" when it doesn't know.
@@ -137,28 +165,34 @@ Anything not on that table does not affect the verdict. There is no hidden scori
 - [x] **TUI** Dashboard · Packages · Quarantine · Agents · Reports (zero-dep ANSI)
 - [x] **M4** Detonation sandbox (WSL2): lifecycle-script execution under network-namespace isolation with DNS sinkhole + C2 capture, categorized evidence reports
 - [x] **M5** Quarantine watch: observed installs, auto-promote / kill on persistence-surface tampering
-- [x] **GUI** Optional loopback browser face over the same core
+- [x] **GUI** Standalone desktop app (separate install) over the same core
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                      surfaces                        │
-│   CLI ─ TUI ─ GUI ─ agent hooks ─ shell shims        │
-└───────────────────────┬──────────────────────────────┘
-                        │ same gate path, always
-┌───────────────────────┴──────────────────────────────┐
-│                     core engine                      │
-│  parse spec → IOC lookup ─┬─ OSV query ─┐            │
-│                           ├─ registry ──┤→ evaluate  │
-│  deterministic rules      └─────────────┘  (pure)    │
-├──────────────────────────────────────────────────────┤
-│  history (encounters · quarantine)  +  WSL2 detonate │
-├──────────────────────────────────────────────────────┤
-│  local cache (~/.gatehouse) - feeds, TTL, offline    │
-└──────────────────────────────────────────────────────┘
+  gatehouse (zero deps)              gatehouse-gui (separate install)
+┌────────────────────────────┐     ┌────────────────────────────────┐
+│  CLI · TUI · agent hooks   │     │  native window (WebView2)      │
+│  shell shims               │     │  no socket, IPC in-process     │
+└─────────────┬──────────────┘     └───────────────┬────────────────┘
+              │                                    │
+              └───────────────┬────────────────────┘
+                              │ same gate path, always
+┌─────────────────────────────┴──────────────────────────────────────┐
+│                            core engine                             │
+│   parse spec → IOC lookup ─┬─ OSV query ─┐                         │
+│                            ├─ registry ──┤→ evaluate (pure)        │
+│   deterministic rules      └─────────────┘                         │
+├────────────────────────────────────────────────────────────────────┤
+│   history (encounters · quarantine)      +   WSL2 detonation       │
+├────────────────────────────────────────────────────────────────────┤
+│   local cache (~/.gatehouse) — feeds, TTL, offline                 │
+└────────────────────────────────────────────────────────────────────┘
 ```
+
 The core never depends on a surface, and no surface may bypass the gate path.
+The dependency between the two packages runs one way only: the app reaches the
+core through its published `exports`, and the core knows nothing about the app.
 
 ## Data sources
 
@@ -179,10 +213,19 @@ Feed refresh defaults to every 12h; `gatehouse sync` forces it.
 git clone <this repo>
 cd gatehouse
 npm install
-npm run build     # tsc -> dist/
-npm test          # unit tests (offline, fixture-based)
-npm run smoke     # M0 thesis test (network): blocks real ChainDrop IOC, passes express, <2s overhead
+npm run build                    # core: tsc -> dist/
+npm run build:gui                # core + desktop app
+npm run bundle -w gatehouse-gui  # build the installable application
+npm test                         # unit tests (offline, fixture-based)
+npm run smoke                    # M0 thesis test (network): blocks a real ChainDrop IOC,
+                                 # passes express, <2s overhead
 ```
+
+The repo is an npm workspace: the root package is the zero-dependency core, and
+`gui/` is the desktop app. Building the app needs Node ≥ 24 (its native addon)
+and the C# compiler that ships with Windows, used to produce the GUI-subsystem
+launcher so no console window appears. Nothing else is required — no Rust, no
+Visual Studio, no bundler.
 
 ## License
 
