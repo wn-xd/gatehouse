@@ -23,6 +23,7 @@ USAGE
   gatehouse watch <pkg> | sweep | list        quarantine watch: observe YELLOW installs
   gatehouse detonate <pkg> [--json]           WSL2 sandbox: run install, capture behavior
   gatehouse tui                               launch the control center (TUI)
+  gatehouse gui                               launch the control center in a browser (loopback)
   gatehouse shim [install|uninstall|status]   manage PATH shims for npm/npx/bun/pnpm/yarn
   gatehouse agent [connect|disconnect|status] [host] [--project]
                                               gate an AI agent; host: claude|cursor|codex|opencode
@@ -42,7 +43,7 @@ RULES (transparent by design)
          (fail safe: if we cannot verify, we do not silently pass)`;
 
 interface CliArgs {
-  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'watch' | 'detonate' | 'help' | 'version';
+  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'gui' | 'watch' | 'detonate' | 'help' | 'version';
   spec?: string;
   json?: boolean;
   shimAction?: 'install' | 'uninstall' | 'status';
@@ -107,6 +108,8 @@ function parseArgs(argv: string[]): CliArgs | null {
       return { command: 'agent-hook', dialect };
     case 'tui':
       return { command: 'tui' };
+    case 'gui':
+      return { command: 'gui' };
     case 'watch':
       return { command: 'watch', watchArg: positional[1], json };
     case 'detonate': {
@@ -326,6 +329,40 @@ async function runDetonate(spec: string, json: boolean): Promise<number> {
   return 0;
 }
 
+/**
+ * `gui` — start the loopback control-center server and open a browser at it.
+ * The server is the same core behind a JSON API; it runs until Ctrl-C. Opening
+ * the browser is best-effort: the URL is always printed so the user can open
+ * it manually if the platform launcher is unavailable.
+ */
+async function runGui(): Promise<number> {
+  const { startGuiServer } = await import('./gui/server.js');
+  const { port, url, close } = await startGuiServer();
+  console.log(`gatehouse GUI on ${url} (loopback only — Ctrl-C to stop)`);
+  void port;
+
+  // Best-effort browser open per platform; ignore failures.
+  const opener =
+    process.platform === 'win32'
+      ? { cmd: 'cmd', args: ['/c', 'start', '', url] }
+      : process.platform === 'darwin'
+        ? { cmd: 'open', args: [url] }
+        : { cmd: 'xdg-open', args: [url] };
+  try {
+    const { spawn } = await import('node:child_process');
+    spawn(opener.cmd, opener.args, { stdio: 'ignore', detached: true, windowsHide: true }).unref();
+  } catch {
+    // no launcher — the printed URL is the fallback
+  }
+
+  await new Promise<void>((resolve) => {
+    process.on('SIGINT', () => {
+      void close().then(resolve);
+    });
+  });
+  return 0;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args === null) {
@@ -367,6 +404,10 @@ async function main(): Promise<number> {
   if (args.command === 'tui') {
     const { runTui } = await import('./tui/index.js');
     return runTui();
+  }
+
+  if (args.command === 'gui') {
+    return runGui();
   }
 
   if (args.command === 'watch') {
