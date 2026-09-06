@@ -45,6 +45,31 @@ directory first on `PATH` and every `npm install <pkg>` / `npx <pkg>` is
 checked before the real command runs; RED exits non-zero and the install
 never happens. `gatehouse shim uninstall` removes them.
 
+### Gate your AI agent (Claude Code)
+
+```bash
+gatehouse agent connect     # writes a PreToolUse hook to ~/.claude/settings.json
+gatehouse agent connect --project   # or per-repo: .claude/settings.json
+gatehouse agent status      # report whether the hook is installed
+gatehouse agent disconnect  # remove it
+```
+
+`agent connect` installs a Claude Code `PreToolUse` hook on the `Bash` /
+`PowerShell` tools. Every shell command the agent runs is inspected before
+execution: Gatehouse extracts each package an `npm`/`npx`/`bun`/`pnpm`/`yarn`
+install would fetch and runs the same deterministic gate the CLI uses.
+
+- **RED** → `permissionDecision: deny`. The install is auto-blocked, no prompt.
+- **YELLOW** → `permissionDecision: ask`. The human confirms.
+- **GREEN** → `permissionDecision: allow`. Silent.
+
+The verdict flags ride back to the agent as structured `additionalContext`
+(`{"gatehouse":[{spec,level,reasons}]}`), so a blocked agent can read *why*
+and pick a safe alternative. The deciding party is always the deterministic
+engine — never the agent, which in this threat model may itself be the
+adversary. ChainDrop persists via `.claude/settings.json`; this points the
+same mechanism the other way.
+
 ## Verdicts
 
 Three levels, decided by a deterministic engine — never an LLM, never a black-box score:
@@ -80,13 +105,14 @@ Anything not on that table does not affect the verdict. There is no hidden scori
 
 - It does not detonate packages — behavioral sandbox analysis (WSL2 + fake internet) is on the roadmap below.
 - It does not watch already-installed packages over time.
-- Shims gate the specs named on the command line, not the full transitive tree a resolver pulls in.
+- Shims gate the specs named on the command line, not the full transitive tree a resolver pulls in. The Claude Code hook gates the same way, per shell command.
 
 ## Roadmap
 
 - [x] **M0** Feed sync + deterministic verdict engine + CLI (this release)
 - [x] **M1** PATH shims so terminal installs route through the gate automatically
-- [ ] **M2** AI-agent connectors — Claude Code `PreToolUse` hook first, then opencode / Codex / Cursor
+- [x] **M2** AI-agent connector — Claude Code `PreToolUse` hook: gates every agent-run install, returns structured verdict flags
+- [ ] **M2+** More agent connectors — opencode / Codex / Cursor
 - [ ] **TUI** Dashboard · Quarantine · Packages · Agents · Reports tabs
 - [ ] **M4** Detonation sandbox v1 (WSL2): lifecycle-script execution with DNS sinkhole, C2 capture, evidence reports
 - [ ] **M5** Quarantine watch: monitored installs, auto-promote / rollback

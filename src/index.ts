@@ -20,6 +20,9 @@ USAGE
   gatehouse check <name[@version]> [--json]   verdict for one package
   gatehouse sync                              refresh IOC feeds now
   gatehouse shim [install|uninstall|status]   manage PATH shims for npm/npx/bun/pnpm/yarn
+  gatehouse agent [connect|disconnect|status] [--project]
+                                              manage the Claude Code PreToolUse gate hook
+  gatehouse agent-hook                        run the gate on a PreToolUse event (stdin JSON)
   gatehouse --help | --version
 
 EXIT CODES
@@ -34,19 +37,26 @@ RULES (transparent by design)
          (fail safe: if we cannot verify, we do not silently pass)`;
 
 interface CliArgs {
-  command: 'check' | 'sync' | 'shim' | 'help' | 'version';
+  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'help' | 'version';
   spec?: string;
   json?: boolean;
   shimAction?: 'install' | 'uninstall' | 'status';
+  agentAction?: 'connect' | 'disconnect' | 'status';
+  scope?: 'user' | 'project';
 }
 
 function parseArgs(argv: string[]): CliArgs | null {
   let json = false;
+  let scope: 'user' | 'project' = 'user';
   const positional: string[] = [];
 
   for (const arg of argv) {
     if (arg === '--json') {
       json = true;
+      continue;
+    }
+    if (arg === '--project') {
+      scope = 'project';
       continue;
     }
     if (arg.startsWith('--')) continue; // unknown flags ignored in v1
@@ -70,6 +80,17 @@ function parseArgs(argv: string[]): CliArgs | null {
       if (!['install', 'uninstall', 'status'].includes(action)) return null;
       return { command: 'shim', json, shimAction: action as 'install' | 'uninstall' | 'status' };
     }
+    case 'agent': {
+      const action = positional[1] ?? 'status';
+      if (!['connect', 'disconnect', 'status'].includes(action)) return null;
+      return {
+        command: 'agent',
+        agentAction: action as 'connect' | 'disconnect' | 'status',
+        scope,
+      };
+    }
+    case 'agent-hook':
+      return { command: 'agent-hook' };
     case 'check': {
       const spec = positional[1];
       if (spec === undefined) return null;
@@ -136,6 +157,15 @@ function printHuman(
   console.log(paint(`checked in ${durationMs}ms`, COLORS.dim));
 }
 
+/** Read all of stdin as UTF-8. Returns '' when nothing is piped. */
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args === null) {
@@ -166,6 +196,35 @@ async function main(): Promise<number> {
   if (args.command === 'shim') {
     const { shim } = await import('./shim.js');
     return shim(args.shimAction ?? 'status');
+  }
+
+  if (args.command === 'agent-hook') {
+    const { runHook } = await import('./agent/hook.js');
+    const stdin = await readStdin();
+    return runHook(stdin, (line) => console.log(line));
+  }
+
+  if (args.command === 'agent') {
+    const { connectClaude, disconnectClaude, isConnected } = await import('./agent/claude.js');
+    const scope = args.scope ?? 'user';
+    if (args.agentAction === 'connect') {
+      const file = await connectClaude(scope);
+      console.log(`Connected Claude Code (${scope}): PreToolUse gate hook written to ${file}`);
+      console.log('Claude Code now routes every Bash install command through the gate.');
+      return 0;
+    }
+    if (args.agentAction === 'disconnect') {
+      const file = await disconnectClaude(scope);
+      console.log(
+        file === null
+          ? `No Gatehouse hook found for ${scope}.`
+          : `Disconnected Claude Code (${scope}): removed gate hook from ${file}`,
+      );
+      return 0;
+    }
+    const on = await isConnected(scope);
+    console.log(`Claude Code gate hook (${scope}): ${on ? 'connected' : 'not connected'}`);
+    return 0;
   }
 
   // args.command === 'check'

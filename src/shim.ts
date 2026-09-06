@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.join(__dirname, '..');
-const GATEHOUSE_BIN = path.join(DIST_DIR, 'src/index.js');
+export const GATEHOUSE_BIN = path.join(DIST_DIR, 'src/index.js');
 
 export type ShimAction = 'install' | 'uninstall' | 'status';
 
@@ -54,6 +54,25 @@ export function isInstallCommand(target: string, args: readonly string[]): boole
   if (verbs === undefined) return false;
   if (verbs.length === 0) return true;
   return verbs.includes(args[0] ?? '');
+}
+
+/**
+ * Package specs an install invocation would fetch, given the tokens AFTER
+ * the command name. Encodes the same rule the generated shims apply inline:
+ * npx gates its first non-flag argument, the verb-based managers gate every
+ * non-flag argument following the install verb. Non-install commands yield
+ * none. Shared with the agent hook so terminal and agent gates never drift.
+ */
+export function installSpecs(target: string, args: readonly string[]): string[] {
+  if (!isInstallCommand(target, args)) return [];
+  const verbs = INSTALL_VERBS[target as ShimTarget];
+  const isFlag = (a: string): boolean => a.startsWith('-');
+  if (verbs.length === 0) {
+    // npx: the first non-flag token is the package about to be fetched.
+    const first = args.find((a) => !isFlag(a));
+    return first === undefined ? [] : [first];
+  }
+  return args.slice(1).filter((a) => !isFlag(a));
 }
 
 /** POSIX single-quoting; both call sites embed absolute paths into sh. */
