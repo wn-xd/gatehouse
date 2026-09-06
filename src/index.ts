@@ -23,7 +23,7 @@ USAGE
   gatehouse watch <pkg> | sweep | list        quarantine watch: observe YELLOW installs
   gatehouse detonate <pkg> [--json]           WSL2 sandbox: run install, capture behavior
   gatehouse tui                               launch the control center (TUI)
-  gatehouse gui                               launch the control center in a browser (loopback)
+  gatehouse gui                               launch the desktop app (separate install)
   gatehouse shim [install|uninstall|status]   manage PATH shims for npm/npx/bun/pnpm/yarn
   gatehouse agent [connect|disconnect|status] [host] [--project]
                                               gate an AI agent; host: claude|cursor|codex|opencode
@@ -329,36 +329,39 @@ async function runDetonate(spec: string, json: boolean): Promise<number> {
 }
 
 /**
- * `gui` — start the loopback control-center server and open a browser at it.
- * The server is the same core behind a JSON API; it runs until Ctrl-C. Opening
- * the browser is best-effort: the URL is always printed so the user can open
- * it manually if the platform launcher is unavailable.
+ * `gui` — hand off to the desktop app.
+ *
+ * The app is a separate artifact (`gatehouse-gui`) because it carries a native
+ * windowing dependency that the core deliberately does not. Core stays
+ * zero-dependency; installing the CLI never pulls the desktop app in. When the
+ * app is absent, say so plainly rather than falling back to something that
+ * merely looks like it.
  */
 async function runGui(): Promise<number> {
-  const { startGuiServer } = await import('./gui/server.js');
-  const { port, url, close } = await startGuiServer();
-  console.log(`gatehouse GUI on ${url} (loopback only — Ctrl-C to stop)`);
-  void port;
+  const { spawn } = await import('node:child_process');
+  const { existsSync } = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
 
-  // Best-effort browser open per platform; ignore failures.
-  const opener =
-    process.platform === 'win32'
-      ? { cmd: 'cmd', args: ['/c', 'start', '', url] }
-      : process.platform === 'darwin'
-        ? { cmd: 'open', args: [url] }
-        : { cmd: 'xdg-open', args: [url] };
-  try {
-    const { spawn } = await import('node:child_process');
-    spawn(opener.cmd, opener.args, { stdio: 'ignore', detached: true, windowsHide: true }).unref();
-  } catch {
-    // no launcher — the printed URL is the fallback
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  // dist/src/ -> repo root -> gui/dist/main.js
+  const local = path.resolve(here, '../../gui/dist/main.js');
+
+  if (!existsSync(local)) {
+    console.error('The Gatehouse desktop app is not installed.');
+    console.error('Install it from the release page, or build it here with:');
+    console.error('  npm run build:gui');
+    return 64;
   }
 
-  await new Promise<void>((resolve) => {
-    process.on('SIGINT', () => {
-      void close().then(resolve);
-    });
+  // Detach so the terminal is not held open by the window; the app is a real
+  // application, not a terminal session.
+  const child = spawn(process.execPath, [local], {
+    stdio: 'ignore',
+    detached: true,
+    windowsHide: true,
   });
+  child.unref();
   return 0;
 }
 

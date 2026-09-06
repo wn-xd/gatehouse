@@ -22,13 +22,28 @@
   "bin": {
     "gatehouse": "dist/src/index.js"
   },
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./engine": "./dist/src/core/engine/check.js",
+    "./feeds": "./dist/src/core/feeds/store.js",
+    "./history/encounters": "./dist/src/core/history/encounters.js",
+    "./history/quarantine": "./dist/src/core/history/quarantine.js",
+    "./registry": "./dist/src/core/registry/npm.js",
+    "./connectors": "./dist/src/agent/connectors.js",
+    "./quarantine/watch": "./dist/src/core/quarantine/watch.js",
+    "./detonate": "./dist/src/core/detonate/runner.js"
+  },
   "files": [
     "dist",
     "README.md",
     "LICENSE"
   ],
+  "workspaces": [
+    "gui"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build:gui": "npm run build && npm run build --workspace gatehouse-gui",
     "test": "vitest run",
     "smoke": "node dist/scripts/smoke.js",
     "gatehouse": "node dist/src/index.js"
