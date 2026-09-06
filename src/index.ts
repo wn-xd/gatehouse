@@ -61,6 +61,8 @@ function parseArgs(argv: string[]): CliArgs | null {
   const positional: string[] = [];
 
   for (const arg of argv) {
+    if (arg === '--help' || arg === '-h') return { command: 'help' };
+    if (arg === '--version' || arg === '-v') return { command: 'version' };
     if (arg === '--json') {
       json = true;
       continue;
@@ -81,11 +83,8 @@ function parseArgs(argv: string[]): CliArgs | null {
     case undefined:
       return { command: 'help' };
     case 'help':
-    case '--help':
-    case '-h':
       return { command: 'help' };
     case 'version':
-    case '--version':
       return { command: 'version' };
     case 'sync':
       return { command: 'sync', json };
