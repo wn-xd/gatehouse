@@ -2,6 +2,11 @@ node_modules/
 dist/
 coverage/
 
+# desktop app build artifacts: the launcher is compiled from launcher.cs and
+# the release tree is assembled by packaging/bundle.mjs, so neither is source.
+gui/packaging/gatehouse.exe
+gui/release/
+
 # gatehouse local cache (if ever created in-repo during dev)
 .gatehouse/
 

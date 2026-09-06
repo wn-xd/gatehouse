@@ -12,7 +12,9 @@
     "gatehouse-gui": "dist/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "launcher": "node packaging/build-launcher.mjs",
+    "bundle": "npm run build && npm run launcher && node packaging/bundle.mjs"
   },
   "dependencies": {
     "@webviewjs/webview": "0.4.4",
