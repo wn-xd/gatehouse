@@ -3,24 +3,21 @@ import {
   setQuarantineState,
   type QuarantineEntry,
 } from '../../core/history/quarantine.js';
-import { paint, truncate } from '../ansi.js';
 import type { Key, Tab } from '../app.js';
-import { renderTable } from '../table.js';
-
-const STATE_STYLE: Record<QuarantineEntry['state'], 'green' | 'yellow' | 'red'> = {
-  watching: 'yellow',
-  promoted: 'green',
-  killed: 'red',
-};
+import type { Screen } from '../buffer.js';
+import { DARK, type Rgb } from '../theme.js';
+import { table, type Box, type TableCell } from '../widgets.js';
 
 /**
- * Quarantine: watch-mode packages with promote / kill controls. ↑↓ selects a
- * row; p promotes the highlighted package, k kills it. Reflects the store M5's
- * watcher also writes to, so manual and automatic decisions share one table.
+ * Quarantine: packages installed under observation, with promote and kill.
+ *
+ * Writes to the same store the watcher uses, so a manual decision here and an
+ * automatic one from `gatehouse watch sweep` are the same kind of fact.
  */
 export function quarantineTab(): Tab {
   let entries: QuarantineEntry[] = [];
   let selected = 0;
+  let notice = '';
 
   const clamp = (): void => {
     if (selected < 0) selected = 0;
@@ -31,6 +28,7 @@ export function quarantineTab(): Tab {
     const entry = entries[selected];
     if (entry === undefined) return;
     await setQuarantineState(entry.name, entry.version, state);
+    notice = `${entry.name} ${state}`;
     entries = await listQuarantine();
     clamp();
   };
@@ -39,8 +37,10 @@ export function quarantineTab(): Tab {
     name: 'Quarantine',
     refresh: async () => {
       entries = await listQuarantine();
+      notice = '';
       clamp();
     },
+
     onKey: async (key: Key): Promise<boolean> => {
       if (key.name === 'up') {
         selected--;
@@ -62,37 +62,60 @@ export function quarantineTab(): Tab {
       }
       return false;
     },
-    render: (rows) => {
+
+    paint: (screen: Screen, box: Box) => {
       if (entries.length === 0) {
-        return [
-          paint('No packages under watch.', 'dim'),
-          '',
-          paint('YELLOW installs can be quarantined for observation.', 'dim'),
-        ];
+        screen.write(box.x, box.y, 'Nothing under watch.', { fg: DARK.textMuted });
+        screen.write(box.x, box.y + 2, 'Packages that need review are observed here', {
+          fg: DARK.textFaint,
+        });
+        screen.write(box.x, box.y + 3, 'after `gatehouse watch <package>`.', {
+          fg: DARK.textFaint,
+        });
+        return;
       }
 
-      const lines: string[] = [paint(`${entries.length} watched packages`, 'bold'), ''];
-      const budget = Math.max(1, rows - lines.length - 1);
-      const table = renderTable(
+      screen.write(box.x, box.y, `${entries.length} watched`, { fg: DARK.textMuted });
+      if (notice !== '') {
+        screen.write(box.x + 14, box.y, notice, { fg: DARK.accent });
+      }
+
+      const listBox: Box = {
+        x: box.x,
+        y: box.y + 2,
+        width: box.width,
+        height: Math.max(3, box.height - 3),
+      };
+      const rows: TableCell[][] = entries.map((e) => [
+        { text: e.state, style: { fg: stateColor(e.state), bold: true } },
+        { text: e.version === null ? e.name : `${e.name}@${e.version}`, style: { fg: DARK.text } },
+        { text: e.reasonCodes.join(', '), style: { fg: DARK.textMuted } },
+        { text: e.since.replace('T', ' ').slice(0, 19), style: { fg: DARK.textFaint } },
+      ]);
+
+      const nameWidth = Math.max(16, Math.floor(box.width * 0.28));
+      table(
+        screen,
+        listBox,
         [
-          { header: ' ', width: 1 },
-          { header: 'STATE', width: 9 },
-          { header: 'PACKAGE', width: 30 },
-          { header: 'SINCE', width: 19 },
-          { header: 'REASONS', width: 24 },
+          { header: 'state', width: 9 },
+          { header: 'package', width: nameWidth },
+          { header: 'reasons', width: Math.max(10, box.width - nameWidth - 34) },
+          { header: 'since', width: 19 },
         ],
-        entries.slice(0, budget).map((e, i) => [
-          i === selected ? paint('▶', 'cyan') : ' ',
-          paint(e.state, STATE_STYLE[e.state]),
-          truncate(e.version === null ? e.name : `${e.name}@${e.version}`, 30),
-          e.since.replace('T', ' ').slice(0, 19),
-          truncate(e.reasonCodes.join(', '), 24),
-        ]),
+        rows,
+        { selected },
       );
-      lines.push(...table);
-      lines.push('');
-      lines.push(paint('↑↓ select · p promote · k kill', 'dim'));
-      return lines;
+
+      screen.write(box.x, box.y + box.height - 1, 'p promote · k kill', {
+        fg: DARK.textFaint,
+      });
     },
   };
+}
+
+function stateColor(state: QuarantineEntry['state']): Rgb {
+  if (state === 'promoted') return DARK.green;
+  if (state === 'killed') return DARK.red;
+  return DARK.yellow;
 }

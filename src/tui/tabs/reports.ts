@@ -1,41 +1,54 @@
-import {
-  readEncounters,
-  type Encounter,
-} from '../../core/history/encounters.js';
-import { LEVEL_STYLE, paint, truncate } from '../ansi.js';
+import { readEncounters, type Encounter } from '../../core/history/encounters.js';
 import type { Key, Tab } from '../app.js';
-import { renderTable } from '../table.js';
+import type { Screen } from '../buffer.js';
+import { DARK, type Rgb } from '../theme.js';
+import { panel, scrollbar, table, type Box, type TableCell } from '../widgets.js';
 
 /**
- * Reports: the full evidence browser. Every recorded encounter, newest first,
- * with ↑↓ to move a selection and Enter to expand the reason codes for the
- * highlighted row. This is the "every scan, every detail" surface from the spec.
+ * Reports: the full evidence browser.
+ *
+ * Every recorded encounter, newest first, with a selection that can be expanded
+ * to show the reason codes behind a verdict. The detail panel is the point: a
+ * verdict without its evidence is just a colour.
  */
 export function reportsTab(): Tab {
   let all: Encounter[] = [];
   let selected = 0;
+  let offset = 0;
   let expanded = false;
 
-  const clampSelection = (): void => {
+  const clamp = (visible: number): void => {
     if (selected < 0) selected = 0;
     if (selected >= all.length) selected = Math.max(0, all.length - 1);
+    // Keep the selection inside the scrolled window.
+    if (selected < offset) offset = selected;
+    if (selected >= offset + visible) offset = selected - visible + 1;
+    if (offset < 0) offset = 0;
   };
 
   return {
     name: 'Reports',
     refresh: async () => {
       all = await readEncounters(500);
-      clampSelection();
+      selected = 0;
+      offset = 0;
     },
+
     onKey: (key: Key): boolean => {
       if (key.name === 'up') {
         selected--;
-        clampSelection();
         return true;
       }
       if (key.name === 'down') {
         selected++;
-        clampSelection();
+        return true;
+      }
+      if (key.name === 'pageup') {
+        selected -= 10;
+        return true;
+      }
+      if (key.name === 'pagedown') {
+        selected += 10;
         return true;
       }
       if (key.name === 'enter') {
@@ -44,66 +57,97 @@ export function reportsTab(): Tab {
       }
       return false;
     },
-    render: (rows) => {
+
+    paint: (screen: Screen, box: Box) => {
       if (all.length === 0) {
-        return [paint('No scans recorded yet.', 'dim')];
+        screen.write(box.x, box.y, 'No scans recorded yet.', { fg: DARK.textFaint });
+        return;
       }
 
-      const lines: string[] = [];
-      lines.push(paint(`${all.length} scans (newest first)`, 'bold'));
-      lines.push('');
+      const detailHeight = expanded ? 6 : 0;
+      const listHeight = Math.max(4, box.height - detailHeight - 1);
+      const visibleRows = Math.max(1, listHeight - 2);
+      clamp(visibleRows);
 
-      const detailLines = expanded ? 6 : 0;
-      const budget = Math.max(1, rows - lines.length - detailLines - 1);
+      screen.write(box.x, box.y, `${all.length} scans, newest first`, {
+        fg: DARK.textMuted,
+      });
 
-      // Keep the selection inside the visible window.
-      let start = 0;
-      if (selected >= budget) start = selected - budget + 1;
-      const window = all.slice(start, start + budget);
+      const listBox: Box = {
+        x: box.x,
+        y: box.y + 2,
+        width: box.width - 2,
+        height: listHeight,
+      };
+      const rows: TableCell[][] = all.map((e) => [
+        { text: e.level.toUpperCase(), style: { fg: levelColor(e.level), bold: true } },
+        { text: e.version === null ? e.name : `${e.name}@${e.version}`, style: { fg: DARK.text } },
+        { text: e.source, style: { fg: DARK.textMuted } },
+        { text: `${e.durationMs}ms`, style: { fg: DARK.textFaint } },
+      ]);
 
-      const table = renderTable(
+      table(
+        screen,
+        listBox,
         [
-          { header: ' ', width: 1 },
-          { header: 'WHEN', width: 19 },
-          { header: 'LEVEL', width: 6 },
-          { header: 'PACKAGE', width: 28 },
-          { header: 'SRC', width: 6 },
-          { header: 'MS', width: 6 },
+          { header: 'verdict', width: 8 },
+          { header: 'package', width: Math.max(18, box.width - 32) },
+          { header: 'source', width: 7 },
+          { header: 'took', width: 8, align: 'right' },
         ],
-        window.map((e, i) => {
-          const marker = start + i === selected ? paint('▶', 'cyan') : ' ';
-          return [
-            marker,
-            e.at.replace('T', ' ').slice(0, 19),
-            paint(e.level.toUpperCase().slice(0, 5), LEVEL_STYLE[e.level]),
-            truncate(e.version === null ? e.name : `${e.name}@${e.version}`, 28),
-            e.source,
-            String(e.durationMs),
-          ];
-        }),
+        rows,
+        { selected, offset },
       );
-      lines.push(...table);
 
-      const detail = all[selected];
-      if (expanded && detail !== undefined) {
-        const e = detail;
-        lines.push('');
-        lines.push(paint('─ detail ─', 'dim'));
-        lines.push(
-          `${paint(e.level.toUpperCase(), LEVEL_STYLE[e.level])} ` +
-            `${e.version === null ? e.name : `${e.name}@${e.version}`}`,
-        );
-        lines.push(
-          e.reasonCodes.length > 0
-            ? `reasons: ${e.reasonCodes.join(', ')}`
-            : paint('reasons: none (feed-clean)', 'dim'),
-        );
-        lines.push(paint(`source: ${e.source} · ${e.at}`, 'dim'));
-      } else {
-        lines.push('');
-        lines.push(paint('↑↓ select · Enter toggles detail', 'dim'));
+      scrollbar(
+        screen,
+        { x: box.x + box.width - 1, y: box.y + 4, width: 1, height: visibleRows },
+        all.length,
+        visibleRows,
+        offset,
+      );
+
+      if (!expanded) {
+        screen.write(box.x, box.y + box.height - 1, 'Enter to show evidence', {
+          fg: DARK.textFaint,
+        });
+        return;
       }
-      return lines;
+
+      const entry = all[selected];
+      if (entry === undefined) return;
+
+      const detailBox: Box = {
+        x: box.x,
+        y: box.y + listHeight + 2,
+        width: box.width - 1,
+        height: detailHeight,
+      };
+      panel(screen, detailBox, 'evidence', true);
+
+      const spec = entry.version === null ? entry.name : `${entry.name}@${entry.version}`;
+      screen.write(detailBox.x + 2, detailBox.y + 1, entry.level.toUpperCase(), {
+        fg: levelColor(entry.level),
+        bold: true,
+      });
+      screen.write(detailBox.x + 2 + entry.level.length + 1, detailBox.y + 1, spec, {
+        fg: DARK.text,
+      });
+
+      const reasons =
+        entry.reasonCodes.length > 0
+          ? entry.reasonCodes.join(', ')
+          : 'no signals — feed-clean at time of check';
+      screen.write(detailBox.x + 2, detailBox.y + 2, reasons, {
+        fg: entry.reasonCodes.length > 0 ? DARK.textMuted : DARK.textFaint,
+      });
+      screen.write(detailBox.x + 2, detailBox.y + 3, `${entry.source} · ${entry.at}`, {
+        fg: DARK.textFaint,
+      });
     },
   };
+}
+
+function levelColor(level: 'green' | 'yellow' | 'red'): Rgb {
+  return level === 'red' ? DARK.red : level === 'yellow' ? DARK.yellow : DARK.green;
 }
