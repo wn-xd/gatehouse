@@ -9,6 +9,7 @@
  *   64 = usage error
  */
 import { check } from './core/engine/check.js';
+import { recordEncounter } from './core/history/encounters.js';
 import { syncIocStore } from './core/feeds/store.js';
 import type { VerdictLevel } from './core/types.js';
 
@@ -235,6 +236,16 @@ async function main(): Promise<number> {
   }
 
   const { verdict, durationMs, feedStale } = outcome.value;
+
+  await recordEncounter({
+    at: verdict.checkedAt,
+    name: verdict.name,
+    version: verdict.version,
+    level: verdict.level,
+    reasonCodes: verdict.reasons.map((r) => r.code),
+    source: 'cli',
+    durationMs,
+  });
 
   if (args.json === true) {
     console.log(

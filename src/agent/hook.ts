@@ -1,4 +1,5 @@
 import { check } from '../core/engine/check.js';
+import { recordEncounter } from '../core/history/encounters.js';
 import type { Verdict, VerdictLevel } from '../core/types.js';
 import { extractInstallTargets } from './command.js';
 
@@ -81,6 +82,15 @@ export async function decide(command: string): Promise<HookDecision> {
       reasons: verdict.reasons.map((r) => ({ code: r.code, detail: r.detail })),
     });
     if (LEVEL_RANK[verdict.level] > LEVEL_RANK[worst]) worst = verdict.level;
+    await recordEncounter({
+      at: verdict.checkedAt,
+      name: verdict.name,
+      version: verdict.version,
+      level: verdict.level,
+      reasonCodes: verdict.reasons.map((r) => r.code),
+      source: 'agent',
+      durationMs: outcome.value.durationMs,
+    });
   }
 
   if (worst === 'red') {
