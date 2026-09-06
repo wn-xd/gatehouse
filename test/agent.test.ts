@@ -1,6 +1,48 @@
 import { describe, expect, it } from 'vitest';
 
 import { extractInstallTargets, tokenize } from '../src/agent/command.js';
+import { runHook } from '../src/agent/hook.js';
+
+describe('runHook (offline paths)', () => {
+  it('stays silent on a non-shell tool', async () => {
+    let out = '';
+    const code = await runHook(
+      JSON.stringify({ tool_name: 'Read', tool_input: { file_path: '/x' } }),
+      (l) => (out += l),
+    );
+    expect(code).toBe(0);
+    expect(out).toBe('');
+  });
+
+  it('stays silent when the command installs nothing', async () => {
+    let out = '';
+    await runHook(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'npm run build' } }),
+      (l) => (out += l),
+    );
+    expect(out).toBe('');
+  });
+
+  it('stays silent on unparseable stdin', async () => {
+    let out = '';
+    const code = await runHook('not json', (l) => (out += l));
+    expect(code).toBe(0);
+    expect(out).toBe('');
+  });
+
+  it('reads Cursor top-level command field', async () => {
+    // 'git status' installs nothing → silent, but proves the field is read
+    // without throwing on the Cursor-shaped payload (no tool_input).
+    let out = '';
+    const code = await runHook(
+      JSON.stringify({ command: 'git status' }),
+      (l) => (out += l),
+      'cursor',
+    );
+    expect(code).toBe(0);
+    expect(out).toBe('');
+  });
+});
 
 describe('tokenize', () => {
   it('keeps quoted args as one token', () => {

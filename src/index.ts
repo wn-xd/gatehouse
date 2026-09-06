@@ -20,10 +20,12 @@ const HELP = `gatehouse ${VERSION} - local-first security gate for npm installs
 USAGE
   gatehouse check <name[@version]> [--json]   verdict for one package
   gatehouse sync                              refresh IOC feeds now
+  gatehouse tui                               launch the control center (TUI)
   gatehouse shim [install|uninstall|status]   manage PATH shims for npm/npx/bun/pnpm/yarn
-  gatehouse agent [connect|disconnect|status] [--project]
-                                              manage the Claude Code PreToolUse gate hook
-  gatehouse agent-hook                        run the gate on a PreToolUse event (stdin JSON)
+  gatehouse agent [connect|disconnect|status] [host] [--project]
+                                              gate an AI agent; host: claude|cursor|codex|opencode
+                                              (status with no host reports all)
+  gatehouse agent-hook [--cursor]             run the gate on a hook event (stdin JSON)
   gatehouse --help | --version
 
 EXIT CODES
@@ -38,17 +40,20 @@ RULES (transparent by design)
          (fail safe: if we cannot verify, we do not silently pass)`;
 
 interface CliArgs {
-  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'help' | 'version';
+  command: 'check' | 'sync' | 'shim' | 'agent' | 'agent-hook' | 'tui' | 'help' | 'version';
   spec?: string;
   json?: boolean;
   shimAction?: 'install' | 'uninstall' | 'status';
   agentAction?: 'connect' | 'disconnect' | 'status';
+  agentHost?: string;
   scope?: 'user' | 'project';
+  dialect?: 'claude' | 'cursor';
 }
 
 function parseArgs(argv: string[]): CliArgs | null {
   let json = false;
   let scope: 'user' | 'project' = 'user';
+  let dialect: 'claude' | 'cursor' = 'claude';
   const positional: string[] = [];
 
   for (const arg of argv) {
@@ -58,6 +63,10 @@ function parseArgs(argv: string[]): CliArgs | null {
     }
     if (arg === '--project') {
       scope = 'project';
+      continue;
+    }
+    if (arg === '--cursor') {
+      dialect = 'cursor';
       continue;
     }
     if (arg.startsWith('--')) continue; // unknown flags ignored in v1
@@ -87,11 +96,14 @@ function parseArgs(argv: string[]): CliArgs | null {
       return {
         command: 'agent',
         agentAction: action as 'connect' | 'disconnect' | 'status',
+        agentHost: positional[2],
         scope,
       };
     }
     case 'agent-hook':
-      return { command: 'agent-hook' };
+      return { command: 'agent-hook', dialect };
+    case 'tui':
+      return { command: 'tui' };
     case 'check': {
       const spec = positional[1];
       if (spec === undefined) return null;
@@ -202,29 +214,53 @@ async function main(): Promise<number> {
   if (args.command === 'agent-hook') {
     const { runHook } = await import('./agent/hook.js');
     const stdin = await readStdin();
-    return runHook(stdin, (line) => console.log(line));
+    return runHook(stdin, (line) => console.log(line), args.dialect ?? 'claude');
+  }
+
+  if (args.command === 'tui') {
+    const { runTui } = await import('./tui/index.js');
+    return runTui();
   }
 
   if (args.command === 'agent') {
-    const { connectClaude, disconnectClaude, isConnected } = await import('./agent/claude.js');
+    const { CONNECTORS, CONNECTOR_LIST } = await import('./agent/connectors.js');
     const scope = args.scope ?? 'user';
+
+    // status with no host → report every connector at a glance.
+    if (args.agentAction === 'status' && args.agentHost === undefined) {
+      for (const c of CONNECTOR_LIST) {
+        const on = await c.isConnected(scope);
+        console.log(`${c.label.padEnd(14)} (${scope}): ${on ? 'connected' : 'not connected'}`);
+      }
+      return 0;
+    }
+
+    const host = args.agentHost ?? 'claude';
+    const connector = CONNECTORS[host];
+    if (connector === undefined) {
+      console.error(
+        `unknown agent host: ${host}. Known: ${CONNECTOR_LIST.map((c) => c.id).join(', ')}`,
+      );
+      return 64;
+    }
+
     if (args.agentAction === 'connect') {
-      const file = await connectClaude(scope);
-      console.log(`Connected Claude Code (${scope}): PreToolUse gate hook written to ${file}`);
-      console.log('Claude Code now routes every Bash install command through the gate.');
+      const file = await connector.connect(scope);
+      console.log(`Connected ${connector.label} (${scope}): gate hook written to ${file}`);
+      console.log(`${connector.label} now routes install commands through the gate.`);
       return 0;
     }
     if (args.agentAction === 'disconnect') {
-      const file = await disconnectClaude(scope);
+      const file = await connector.disconnect(scope);
       console.log(
         file === null
-          ? `No Gatehouse hook found for ${scope}.`
-          : `Disconnected Claude Code (${scope}): removed gate hook from ${file}`,
+          ? `No Gatehouse hook found for ${connector.label} (${scope}).`
+          : `Disconnected ${connector.label} (${scope}): removed gate hook from ${file}`,
       );
       return 0;
     }
-    const on = await isConnected(scope);
-    console.log(`Claude Code gate hook (${scope}): ${on ? 'connected' : 'not connected'}`);
+    const on = await connector.isConnected(scope);
+    console.log(`${connector.label} gate hook (${scope}): ${on ? 'connected' : 'not connected'}`);
     return 0;
   }
 

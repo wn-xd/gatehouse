@@ -10,6 +10,8 @@ import { extractInstallTargets } from './command.js';
 interface HookInput {
   tool_name?: string;
   tool_input?: { command?: string };
+  /** Cursor's beforeShellExecution puts the command at the top level. */
+  command?: string;
 }
 
 /** `permissionDecision` values PreToolUse understands. */
@@ -125,18 +127,27 @@ function reasonLine(head: string, flags: VerdictFlag[], level: VerdictLevel): st
   return `gatehouse: ${head}: ${hits.join('; ')}`;
 }
 
+/** Output dialect per agent host. */
+export type HookDialect = 'claude' | 'cursor';
+
 /**
- * Read a PreToolUse event on stdin, gate any install it describes, and write
- * the Claude Code hook response on stdout.
+ * Read a PreToolUse-style event on stdin, gate any install it describes, and
+ * write the host's hook response on stdout.
  *
  * Contract: always exits 0 and speaks through JSON, so a gate hiccup never
- * hard-crashes the agent's turn. A non-Bash tool, an unparseable payload, or
+ * hard-crashes the agent's turn. A non-shell tool, an unparseable payload, or
  * an empty command yields no decision (empty stdout), letting the normal
- * permission flow proceed. Only a real verdict emits `permissionDecision`.
+ * permission flow proceed. Only a real verdict emits a decision.
+ *
+ * `dialect` selects the wire shape:
+ *   - claude: Claude Code / Codex `hookSpecificOutput.permissionDecision`
+ *   - cursor: Cursor `beforeShellExecution` `{ permission, userMessage, agentMessage }`
+ * Both derive from the SAME deterministic `decide()`; only serialization differs.
  */
 export async function runHook(
   stdin: string,
   emit: (line: string) => void,
+  dialect: HookDialect = 'claude',
 ): Promise<number> {
   let input: HookInput;
   try {
@@ -145,8 +156,14 @@ export async function runHook(
     return 0; // unparseable → no decision, normal flow applies
   }
 
-  const isShellTool = input.tool_name === 'Bash' || input.tool_name === 'PowerShell';
-  const command = input.tool_input?.command;
+  // Claude/Codex send tool_name + tool_input.command; Cursor sends command
+  // at the top level for beforeShellExecution. Accept either.
+  const isShellTool =
+    input.tool_name === undefined ||
+    input.tool_name === 'Bash' ||
+    input.tool_name === 'PowerShell' ||
+    input.tool_name === 'Shell';
+  const command = input.tool_input?.command ?? input.command;
   if (!isShellTool || typeof command !== 'string' || command.trim().length === 0) {
     return 0;
   }
@@ -157,6 +174,20 @@ export async function runHook(
   }
 
   const context = JSON.stringify({ gatehouse: decision.flags });
+  if (dialect === 'cursor') {
+    // Cursor: allow | deny | ask via `permission`; messages are optional.
+    const permission =
+      decision.permissionDecision === 'allow' ? 'allow' : decision.permissionDecision;
+    emit(
+      JSON.stringify({
+        permission,
+        agentMessage: decision.permissionDecisionReason,
+        userMessage: decision.permissionDecisionReason,
+      }),
+    );
+    return 0;
+  }
+
   emit(
     JSON.stringify({
       hookSpecificOutput: {

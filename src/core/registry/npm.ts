@@ -109,3 +109,40 @@ export function extractSignals(
     },
   };
 }
+
+/** One npm registry search hit: name + latest version. */
+export interface SearchHit {
+  name: string;
+  version: string;
+  description: string;
+}
+
+/**
+ * Search the npm registry. Powers the Packages tab, where each hit is then
+ * run through the gate to render its verdict inline — the column no other
+ * package browser can show. Returns at most `size` hits.
+ */
+export async function searchRegistry(
+  query: string,
+  size = 20,
+): Promise<Result<SearchHit[]>> {
+  const url = `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(query)}&size=${size}`;
+  const res = await safeFetch(url, { headers: { accept: 'application/json' } });
+  if (!res.ok) return res;
+  try {
+    const text = await res.value.text();
+    const data = JSON.parse(text) as {
+      objects?: { package?: { name?: string; version?: string; description?: string } }[];
+    };
+    const hits: SearchHit[] = [];
+    for (const obj of data.objects ?? []) {
+      const pkg = obj.package;
+      if (pkg?.name === undefined || pkg.version === undefined) continue;
+      hits.push({ name: pkg.name, version: pkg.version, description: pkg.description ?? '' });
+    }
+    return { ok: true, value: hits };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `search response parse failed: ${msg}` };
+  }
+}
